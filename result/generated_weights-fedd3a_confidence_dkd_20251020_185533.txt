@@ -1,0 +1,4 @@
+Round,Avg_Train_Loss,Avg_Distillation_Loss,Avg_Test_Accuracy,Generation_Time_s
+5,0.9532,2.2246,23.38,8.36
+10,0.6160,0.7603,27.04,8.29
+15,0.2903,0.3547,30.92,8.34
