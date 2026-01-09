@@ -42,7 +42,7 @@ class Client:
         
         self.model = model_instance.to(device)
         self.optimizer_model = optim.SGD(self.model.parameters(), lr=0.1, momentum=0.9, weight_decay=1e-4)
-        self.scheduler_model = optim.lr_scheduler.CosineAnnealingLR(self.optimizer_model, T_max=rounds)
+        self.scheduler_model = optim.lr_scheduler.CosineAnnealingLR(self.optimizer_model, T_max=rounds, eta_min=1e-4)
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
 
         # self.base_lr = 0.1
@@ -104,7 +104,8 @@ class Client:
         return lr_lambda
 
     def UpdateClassCounts(self, labels, device):
-        new_counts = torch.tensor(np.bincount(labels, minlength=10), dtype=torch.float32, device=device)
+        # 直接在 GPU 上计算，保持全 PyTorch 流程
+        new_counts = torch.bincount(labels, minlength=10).to(dtype=torch.float32, device=device)
         self.dynamic_class_counts = self.real_class_counts + new_counts
 
     def get_real_sample_batch(self, batch_size):
