@@ -90,7 +90,7 @@ def get_probabilistic_scarcity_batch(client, dataloader_iterator, full_dataloade
     为单个客户端，根据其本地数据稀缺性，从公共数据集中概率性地构建一个批次。
     """
     # 1. 根据数据稀缺性，计算每个类别的采样概率
-    class_counts = client.class_counts
+    class_counts = client.real_class_counts
     if annealing_enabled:
         # --- 退火机制逻辑 ---
         # a. 计算退火因子 gamma，它会从 1.0 线性下降到 0.0
@@ -149,7 +149,7 @@ def get_random_batch(client, dataloader_iterator, full_dataloader, target_batch_
     为单个客户端，根据其本地数据稀缺性，从公共数据集中概率性地构建一个批次。
     """
     # 1. 根据数据稀缺性，计算每个类别的采样概率
-    class_counts = client.class_counts
+    class_counts = client.real_class_counts
         
         # e. 归一化得到最终概率
     uniform_weights = torch.ones_like(class_counts)
@@ -374,7 +374,7 @@ def main(args):
 
                         # [修改] 2. 混合两种采样权重
                         # 确保 class_counts 是 tensor 格式以便计算
-                        counts_tensor = torch.as_tensor(client.class_counts, device=device, dtype=torch.float32)
+                        counts_tensor = torch.as_tensor(client.real_class_counts, device=device, dtype=torch.float32)
 
                         # A. 稀缺性权重 (原始逻辑: 样本越少权重越大)
                         scarcity_weights = 1.0 / (counts_tensor + 1e-6)
@@ -467,10 +467,10 @@ def main(args):
         
                     # b. 计算稀缺性权重 (偏向 non-IID)
                     epsilon = 1e-6
-                    scarcity_weights = 1.0 / (student_client.class_counts + epsilon)
+                    scarcity_weights = 1.0 / (student_client.dynamic_class_counts + epsilon)
                     
                     # c. 定义均匀权重 (代表 IID)
-                    uniform_weights = torch.ones_like(student_client.class_counts)
+                    uniform_weights = torch.ones_like(student_client.dynamic_class_counts)
                     
                     # d. 线性插值：早期 gamma 接近1，侧重稀缺性；后期 gamma 接近0，侧重均匀性
                     final_weights = gamma * scarcity_weights + (1.0 - gamma) * uniform_weights
