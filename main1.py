@@ -20,6 +20,7 @@ from factory import create_clients
 
 MAX_GEN_SAMPLES = 5000
 SATURATION_ROUND = 400
+GEN_DATA_WEIGHT = 0.3
 
 # torch.autograd.set_detect_anomaly(True)
 
@@ -388,7 +389,7 @@ def main(args):
                         
                         # 更新缓存
                         aux_data_for_clients[i] = (aux_imgs, aux_labels)
-                    client.UpdateClassCounts(aux_labels, device)
+                    client.UpdateClassCounts(aux_labels, device, weight=GEN_DATA_WEIGHT)
             else:
                 print(f"  [策略B] 晚期增强 (复用数据): 使用上一轮生成的辅助数据")
         local_losses = []

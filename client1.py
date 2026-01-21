@@ -103,10 +103,11 @@ class Client:
         
         return lr_lambda
 
-    def UpdateClassCounts(self, labels, device):
+    def UpdateClassCounts(self, labels, device, weight):
         # 直接在 GPU 上计算，保持全 PyTorch 流程
         new_counts = torch.bincount(labels, minlength=10).to(dtype=torch.float32, device=device)
-        self.dynamic_class_counts = self.real_class_counts + new_counts
+        weighted_counts = new_counts * weight
+        self.dynamic_class_counts = self.real_class_counts + weighted_counts
 
     def get_real_sample_batch(self, batch_size):
         """从本地数据加载器中随机抽取一批真实数据"""
@@ -325,9 +326,6 @@ class Client:
             weights = inv_scores / inv_scores.sum()
             return [n.model for n in self.neighbors], [n.id for n in self.neighbors], weights
 
-        # ============================================================
-        # 1. 缓存原始分数 (只计算一次)
-        # ============================================================
         if self.cached_complementary_probs is None or round % 10 == 1: # 这里借用这个变量名存分数
             imbalance_scores = []
             for neighbor in self.neighbors:
@@ -433,7 +431,7 @@ class Client:
         
         elif teacher_selector == 'complementary':
             # 每一轮随机取 2 个 (您可以根据需要修改 k)
-            k = 1
+            k = 2
             active_teachers, teacher_ids, comp_weights= self.select_complementary_teachers(num_select=k, round=round_idx)
             num_teachers = len(active_teachers)
 
@@ -546,38 +544,90 @@ class Client:
         
         if distill_mode == 'dkd':
             # 遍历每一个活跃的教师
-            for i, teacher in enumerate(active_teachers):
-                teacher.eval()
-                with torch.no_grad():
-                    # 1. 获取 Logits
-                    t_logits = teacher(filtered_data) # [B, C]
+            # for i, teacher in enumerate(active_teachers):
+            #     teacher.eval()
+            #     with torch.no_grad():
+            #         # 1. 获取 Logits
+            #         t_logits = teacher(filtered_data) # [B, C]
                     
-                    # 2. 计算 Softmax 概率
-                    t_probs = F.softmax(t_logits, dim=1)
+            #         # 2. 计算 Softmax 概率
+            #         t_probs = F.softmax(t_logits, dim=1)
                     
-                    # 3. [关键修改] 获取真实标签对应的置信度 (作为 NCKD 系数)
-                    # distill_labels 需要是 LongTensor [B]
-                    # target_probs: [B] (范围 0.0 ~ 1.0)
-                    target_probs = t_probs.gather(1, distill_labels.view(-1, 1)).squeeze()
-                    scale_factor = 1.0 
+            #         # 3. [关键修改] 获取真实标签对应的置信度 (作为 NCKD 系数)
+            #         # distill_labels 需要是 LongTensor [B]
+            #         # target_probs: [B] (范围 0.0 ~ 1.0)
+            #         target_probs = t_probs.gather(1, distill_labels.view(-1, 1)).squeeze()
+            #         scale_factor = 1.0 
                     
-                    beta_i = target_probs * scale_factor      # [B]
-                    alpha_i = (1.0 - target_probs) * scale_factor  # [B]
+            #         beta_i = target_probs * scale_factor      # [B]
+            #         alpha_i = (1.0 - target_probs) * scale_factor  # [B]
 
-                # 5. 获取该教师的专家权重 (基于数据量)
-                # weight_i: [B]
-                weight_i = alpha[:, i] 
+            #     # 5. 获取该教师的专家权重 (基于数据量)
+            #     # weight_i: [B]
+            #     weight_i = alpha[:, i] 
                 
-                if weight_i.sum() == 0:
-                    continue
+            #     if weight_i.sum() == 0:
+            #         continue
+            scores = []
+            neighbor_ids = []
+            for n in self.neighbors:
+                s = torch.std(self.dynamic_class_counts + n.dynamic_class_counts).item()
+                scores.append(s)
+                neighbor_ids.append(n.id)
+            scores_tensor = torch.tensor(scores, device=self.device)
+            # 反比权重: 1 / score
+            inv_scores = 1.0 / (scores_tensor + 1e-6)
+            mean = inv_scores.mean()
+            std = inv_scores.std()
+            if std == 0: std = 1.0
+
+            normalized_scores = (inv_scores - mean) / std
+            all_betas = torch.sigmoid(normalized_scores / 1.0)
+
+            beta_map = {}
+            std_map = {}
+
+            for idx, n_id in enumerate(neighbor_ids):
+                b_val = all_betas[idx].item()
+                # 截断保护
+                b_val = max(0.1, min(0.9, b_val))
+                
+                beta_map[n_id] = b_val
+                std_map[n_id] = scores[idx]
+
 
                 # 6. 计算 Loss (传入 alpha 和 beta 向量)
+            for i, teacher in enumerate(active_teachers):
+                # 获取当前老师的 ID
+                tid = teacher_ids[i] 
+                
+                # [安全查找] 从字典里获取对应的 Beta 和原始 STD
+                if tid in beta_map:
+                    beta_i = beta_map[tid]
+                    raw_std = std_map[tid]
+                else:
+                    # 防御性代码：如果万一 ID 对不上 (比如 id 类型不一致)，给个默认值
+                    print(f"Warning: Teacher ID {tid} not found in neighbors!")
+                    beta_i = 0.5 
+                    raw_std = -1.0
+                
+                alpha_i = 1.0 - beta_i
+
+                # 打印调试
+                # if self.id == 0: 
+                #     print(f"  [Teacher ID {tid}] STD={raw_std:.1f} --> Beta={beta_i:.4f} | Alpha={alpha_i:.4f}")
+
+                t_logits = teacher(filtered_data)
                 loss_i_vector = self.compute_sample_wise_dkd(
                     student_logits, t_logits, distill_labels, 
                     alpha_i, beta_i, temperature
                 )
                 
                 # 7. 加权累加 (Expert Weight)
+                weight_i = alpha[:, i] 
+                
+                if weight_i.sum() == 0:
+                    continue
                 weighted_loss_i = (loss_i_vector * weight_i).sum() / student_logits.size(0)
                 total_loss += weighted_loss_i
 
